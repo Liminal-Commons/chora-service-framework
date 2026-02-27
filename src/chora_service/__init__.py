@@ -21,10 +21,22 @@ Every ecosystem service uses EcosystemService as its entry point:
         service.run()
 """
 
-from chora_service.config import BaseServiceConfig
-from chora_service.errors import ServiceError
-from chora_service.mcp import ResilientSessionManager
-from chora_service.service import EcosystemService
+def __getattr__(name: str) -> object:
+    """Lazy imports — allows `from chora_service.mcp import LazyMCPServer`
+    without pulling in fastapi/pydantic-settings (which EcosystemService needs)."""
+    if name == "EcosystemService":
+        from chora_service.service import EcosystemService
+        return EcosystemService
+    if name == "BaseServiceConfig":
+        from chora_service.config import BaseServiceConfig
+        return BaseServiceConfig
+    if name == "ResilientSessionManager":
+        from chora_service.mcp import ResilientSessionManager
+        return ResilientSessionManager
+    if name == "ServiceError":
+        from chora_service.errors import ServiceError
+        return ServiceError
+    raise AttributeError(f"module 'chora_service' has no attribute {name!r}")
 
 __all__ = [
     "EcosystemService",
