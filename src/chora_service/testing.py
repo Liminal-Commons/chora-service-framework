@@ -42,6 +42,21 @@ async def test_client(test_service: EcosystemService) -> AsyncClient:  # type: i
         yield client
 
 
+def make_test_client(service: EcosystemService) -> AsyncClient:
+    """Create an httpx AsyncClient for any EcosystemService.
+
+    Usage in a service's test file:
+        from chora_service.testing import make_test_client
+        from myservice.server import service
+
+        @pytest.fixture
+        def client():
+            return make_test_client(service)
+    """
+    transport = ASGITransport(app=service.api)
+    return AsyncClient(transport=transport, base_url="http://test")
+
+
 async def invoke_mcp_tool(
     service: EcosystemService,
     tool_name: str,

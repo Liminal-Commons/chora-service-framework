@@ -2,6 +2,7 @@
 
 Ported from shared/lazy_discovery.py with additions:
 - build_mcp_mount() for embedding into FastAPI apps (EcosystemService uses this)
+- ResilientSessionManager for container-restart resilience
 - run() still works for standalone MCP-only services (backward compat)
 
 Agents see only 3 meta-tools: discover_tools, get_tool_details, invoke_tool.
@@ -10,15 +11,127 @@ Agents see only 3 meta-tools: discover_tools, get_tool_details, invoke_tool.
 import asyncio
 import contextlib
 import json
+import logging
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
+import anyio
+from anyio.abc import TaskStatus
 from mcp.server import Server
+from mcp.server.streamable_http import (
+    EventStore,
+    StreamableHTTPServerTransport,
+)
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.stdio import stdio_server
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import TextContent, Tool
 
+logger = logging.getLogger(__name__)
+
 type ToolHandler = Callable[[dict[str, Any]], Awaitable[str]]
+
+
+# ─────────────────────────────────────────────────────────────
+# ResilientSessionManager — survives container restarts
+# ─────────────────────────────────────────────────────────────
+
+
+class ResilientSessionManager(StreamableHTTPSessionManager):
+    """Session manager that auto-recreates sessions for unknown session IDs.
+
+    When a Docker container restarts, in-memory session state is lost.
+    The MCP client still sends the cached session ID from before the restart.
+    The default SDK behavior returns 404 "Session not found", which the client
+    treats as fatal.
+
+    This subclass intercepts the unknown-session-ID case and transparently
+    recreates the session:
+    1. Creates a new transport with the client's original session ID
+    2. Starts the MCP server with stateless=True (skips initialize handshake)
+    3. Processes the original request — the client never sees an error
+
+    Sessions are preserved (not removed) for future SSE and server-initiated
+    notification support.
+    """
+
+    async def _handle_stateful_request(  # type: ignore[override]
+        self,
+        scope: Any,
+        receive: Any,
+        send: Any,
+    ) -> None:
+        """Override to recover unknown sessions instead of returning 404."""
+        from starlette.requests import Request
+
+        from mcp.server.streamable_http import MCP_SESSION_ID_HEADER
+
+        request = Request(scope, receive)
+        request_session_id = request.headers.get(MCP_SESSION_ID_HEADER)
+
+        # Known session or no session — delegate to parent (normal flow)
+        if request_session_id is None or request_session_id in self._server_instances:
+            await super()._handle_stateful_request(scope, receive, send)
+            return
+
+        # Unknown session ID — recover instead of 404
+        logger.info("Recovering unknown session: %s", request_session_id)
+
+        async with self._session_creation_lock:
+            # Double-check under lock (another request may have recreated it)
+            if request_session_id in self._server_instances:
+                transport = self._server_instances[request_session_id]
+                await transport.handle_request(scope, receive, send)
+                return
+
+            # Create transport with the CLIENT's original session ID
+            http_transport = StreamableHTTPServerTransport(
+                mcp_session_id=request_session_id,
+                is_json_response_enabled=self.json_response,
+                event_store=self.event_store,
+                security_settings=self.security_settings,
+                retry_interval=self.retry_interval,
+            )
+            self._server_instances[request_session_id] = http_transport
+
+            # Start server with stateless=True — sets ServerSession to
+            # Initialized state, skipping the initialize handshake.
+            # The client already initialized before the container restart.
+            async def run_recovered_server(
+                *, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED,
+            ) -> None:
+                async with http_transport.connect() as streams:
+                    read_stream, write_stream = streams
+                    task_status.started()
+                    try:
+                        await self.app.run(
+                            read_stream,
+                            write_stream,
+                            self.app.create_initialization_options(),
+                            stateless=True,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Recovered session %s crashed: %s",
+                            request_session_id,
+                            exc,
+                            exc_info=True,
+                        )
+                    finally:
+                        if (
+                            request_session_id in self._server_instances
+                            and not http_transport.is_terminated
+                        ):
+                            logger.info(
+                                "Cleaning up crashed recovered session %s",
+                                request_session_id,
+                            )
+                            del self._server_instances[request_session_id]
+
+            assert self._task_group is not None
+            await self._task_group.start(run_recovered_server)
+            await http_transport.handle_request(scope, receive, send)
 
 
 class ToolEntry:
@@ -289,10 +402,9 @@ class LazyMCPServer:
             app.mount("/mcp", mcp_app)
         """
         from mcp.server.fastmcp.server import StreamableHTTPASGIApp
-        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
         if self._session_manager is None:
-            self._session_manager = StreamableHTTPSessionManager(
+            self._session_manager = ResilientSessionManager(
                 app=self._server,
                 json_response=False,
                 stateless=False,
@@ -338,14 +450,13 @@ class LazyMCPServer:
             return self._asgi_app
 
         from mcp.server.fastmcp.server import StreamableHTTPASGIApp
-        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
         from starlette.applications import Starlette
         from starlette.requests import Request
         from starlette.responses import JSONResponse
         from starlette.routing import Route
 
         if self._session_manager is None:
-            self._session_manager = StreamableHTTPSessionManager(
+            self._session_manager = ResilientSessionManager(
                 app=self._server,
                 json_response=False,
                 stateless=False,
