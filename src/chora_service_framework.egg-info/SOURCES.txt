@@ -1,0 +1,16 @@
+pyproject.toml
+src/chora_service/__init__.py
+src/chora_service/auth.py
+src/chora_service/config.py
+src/chora_service/errors.py
+src/chora_service/health.py
+src/chora_service/logging.py
+src/chora_service/mcp.py
+src/chora_service/service.py
+src/chora_service/testing.py
+src/chora_service_framework.egg-info/PKG-INFO
+src/chora_service_framework.egg-info/SOURCES.txt
+src/chora_service_framework.egg-info/dependency_links.txt
+src/chora_service_framework.egg-info/requires.txt
+src/chora_service_framework.egg-info/top_level.txt
+tests/test_service.py
