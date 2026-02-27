@@ -22,7 +22,13 @@ Every ecosystem service uses EcosystemService as its entry point:
 """
 
 from chora_service.config import BaseServiceConfig
+from chora_service.errors import ServiceError
 from chora_service.mcp import ResilientSessionManager
 from chora_service.service import EcosystemService
 
-__all__ = ["EcosystemService", "BaseServiceConfig", "ResilientSessionManager"]
+__all__ = [
+    "EcosystemService",
+    "BaseServiceConfig",
+    "ResilientSessionManager",
+    "ServiceError",
+]

@@ -1,11 +1,12 @@
 """Tests for EcosystemService — dual-protocol creation and wiring."""
 
 import json
+from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from chora_service import BaseServiceConfig, EcosystemService
+from chora_service import BaseServiceConfig, EcosystemService, ServiceError
 
 
 class SvcConfig(BaseServiceConfig):
@@ -111,3 +112,79 @@ class TestErrorEnvelope:
         result = service.error("VALIDATION", "Bad input", details={"field": "name"})
         assert result["success"] is False
         assert result["error"]["details"] == {"field": "name"}
+
+
+class TestAutoEnvelope:
+    """Tests for auto_envelope=True — handlers return plain data, framework wraps."""
+
+    @pytest.fixture
+    def envelope_service(self) -> EcosystemService:
+        config = SvcConfig(service_version="0.1.0")
+        svc = EcosystemService("test-envelope", config)
+
+        @svc.tool(
+            name="greet",
+            description="Greet someone",
+            category="test",
+            input_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+            auto_envelope=True,
+        )
+        async def greet(args: dict[str, Any]) -> dict[str, str]:
+            name = args.get("name", "")
+            if not name:
+                raise ServiceError("VALIDATION", "name is required")
+            return {"message": f"Hello, {name}!"}
+
+        return svc
+
+    async def test_auto_envelope_wraps_success(
+        self, envelope_service: EcosystemService
+    ) -> None:
+        result = await envelope_service.mcp._meta_invoke(
+            {"tool_name": "greet", "arguments": {"name": "Alice"}}
+        )
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["data"]["message"] == "Hello, Alice!"
+
+    async def test_auto_envelope_catches_service_error(
+        self, envelope_service: EcosystemService
+    ) -> None:
+        result = await envelope_service.mcp._meta_invoke(
+            {"tool_name": "greet", "arguments": {"name": ""}}
+        )
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "VALIDATION"
+        assert data["error"]["message"] == "name is required"
+
+    async def test_auto_envelope_error_with_details(self) -> None:
+        config = SvcConfig(service_version="0.1.0")
+        svc = EcosystemService("test-details", config)
+
+        @svc.tool(
+            name="lookup",
+            description="Look up item",
+            category="test",
+            auto_envelope=True,
+        )
+        async def lookup(args: dict[str, Any]) -> dict[str, str]:
+            raise ServiceError("NOT_FOUND", "Item missing", details={"id": "abc"})
+
+        result = await svc.mcp._meta_invoke(
+            {"tool_name": "lookup", "arguments": {}}
+        )
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "NOT_FOUND"
+        assert data["error"]["details"] == {"id": "abc"}
+
+    async def test_auto_envelope_tool_registered(
+        self, envelope_service: EcosystemService
+    ) -> None:
+        assert envelope_service.mcp.tool_count == 1
+        assert "greet" in envelope_service.mcp._registry

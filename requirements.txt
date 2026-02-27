@@ -1,0 +1,7 @@
+# Auto-generated from pyproject.toml [project.dependencies]
+# Used by: pip-audit -r requirements.txt (scoped audit, not system-wide)
+mcp>=1.26.0
+fastapi>=0.115.0
+pydantic-settings>=2.0
+structlog>=24.0
+uvicorn>=0.32.0

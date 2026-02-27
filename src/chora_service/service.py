@@ -5,6 +5,9 @@ Both interfaces share the same domain logic layer.
 """
 
 import contextlib
+import functools
+import json
+import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -13,11 +16,14 @@ from fastapi import FastAPI
 
 from chora_service.auth import make_auth_dependency
 from chora_service.config import BaseServiceConfig
+from chora_service.errors import ServiceError
 from chora_service.errors import error as _error
 from chora_service.errors import ok as _ok
 from chora_service.health import build_health_router
 from chora_service.logging import configure_logging
 from chora_service.mcp import LazyMCPServer, ToolHandler
+
+_logger = logging.getLogger(__name__)
 
 
 class EcosystemService:
@@ -79,15 +85,42 @@ class EcosystemService:
         category: str,
         input_schema: dict[str, Any] | None = None,
         examples: list[str] | None = None,
-    ) -> Callable[[ToolHandler], ToolHandler]:
-        """Register an MCP tool. Delegates to LazyMCPServer."""
-        return self.mcp.tool(
+        auto_envelope: bool = False,
+    ) -> Callable[..., Any]:
+        """Register an MCP tool. Delegates to LazyMCPServer.
+
+        When auto_envelope=True, the handler returns plain data and raises
+        ServiceError for errors. The framework handles json.dumps + ok/error:
+
+            @service.tool(name="my_tool", ..., auto_envelope=True)
+            async def my_tool(args):
+                if not args.get("id"):
+                    raise ServiceError("VALIDATION", "id is required")
+                return {"result": "data"}  # auto-wrapped in ok() + json.dumps
+        """
+        mcp_decorator = self.mcp.tool(
             name=name,
             description=description,
             category=category,
             input_schema=input_schema,
             examples=examples,
         )
+
+        if not auto_envelope:
+            return mcp_decorator
+
+        def decorator(fn: Callable[..., Any]) -> ToolHandler:
+            @functools.wraps(fn)
+            async def wrapper(args: dict[str, Any]) -> str:
+                try:
+                    result = await fn(args)
+                    return json.dumps(_ok(result))
+                except ServiceError as e:
+                    return json.dumps(_error(e.code, str(e), e.details))
+
+            return mcp_decorator(wrapper)
+
+        return decorator
 
     @staticmethod
     def ok(data: Any) -> dict[str, Any]:

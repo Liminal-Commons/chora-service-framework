@@ -19,13 +19,11 @@ from typing import Any
 import anyio
 from anyio.abc import TaskStatus
 from mcp.server import Server
+from mcp.server.stdio import stdio_server
 from mcp.server.streamable_http import (
-    EventStore,
     StreamableHTTPServerTransport,
 )
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from mcp.server.stdio import stdio_server
-from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import TextContent, Tool
 
 logger = logging.getLogger(__name__)
@@ -56,16 +54,15 @@ class ResilientSessionManager(StreamableHTTPSessionManager):
     notification support.
     """
 
-    async def _handle_stateful_request(  # type: ignore[override]
+    async def _handle_stateful_request(
         self,
         scope: Any,
         receive: Any,
         send: Any,
     ) -> None:
         """Override to recover unknown sessions instead of returning 404."""
-        from starlette.requests import Request
-
         from mcp.server.streamable_http import MCP_SESSION_ID_HEADER
+        from starlette.requests import Request
 
         request = Request(scope, receive)
         request_session_id = request.headers.get(MCP_SESSION_ID_HEADER)
