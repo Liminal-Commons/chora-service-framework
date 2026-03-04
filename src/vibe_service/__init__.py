@@ -36,6 +36,12 @@ def __getattr__(name: str) -> object:
     if name == "ServiceError":
         from vibe_service.errors import ServiceError
         return ServiceError
+    if name == "discover_features":
+        from vibe_service.discovery import discover_features
+        return discover_features
+    if name == "FeatureModule":
+        from vibe_service.discovery import FeatureModule
+        return FeatureModule
     raise AttributeError(f"module 'vibe_service' has no attribute {name!r}")
 
 __all__ = [
@@ -43,4 +49,6 @@ __all__ = [
     "BaseServiceConfig",
     "ResilientSessionManager",
     "ServiceError",
+    "discover_features",
+    "FeatureModule",
 ]

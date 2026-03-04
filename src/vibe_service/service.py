@@ -12,7 +12,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from vibe_service.auth import make_auth_dependency
 from vibe_service.config import BaseServiceConfig
@@ -120,6 +120,73 @@ class EcosystemService:
 
             return mcp_decorator(wrapper)
 
+        return decorator
+
+    def feature(
+        self,
+        name: str,
+        domain: str,
+        category: str,
+        description: str,
+        input_schema: dict[str, Any] | None = None,
+        examples: list[str] | None = None,
+        handler: Callable[..., Any] | None = None,
+    ) -> Callable[..., Any]:
+        """Register a dual-protocol feature: MCP tool + REST POST endpoint.
+
+        The handler takes args: dict[str, Any] and returns plain data.
+        ServiceError is caught and converted to error envelope on both protocols.
+
+        Decorator form:
+            @service.feature(name="list_nodes", domain="graph", category="query", ...)
+            async def list_nodes(args):
+                return {"nodes": [...]}
+
+        Imperative form (for auto-discovery):
+            service.feature(name="list_nodes", ..., handler=my_handler)
+
+        MCP:  invoke_tool("list_nodes", {...}) → ok/error JSON string
+        REST: POST /api/graph/list_nodes {...}  → ok/error JSON response
+        """
+
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            # --- MCP registration (auto_envelope pattern) ---
+            @functools.wraps(fn)
+            async def mcp_wrapper(args: dict[str, Any]) -> str:
+                try:
+                    result = await fn(args)
+                    return json.dumps(_ok(result))
+                except ServiceError as e:
+                    return json.dumps(_error(e.code, str(e), e.details))
+
+            self.mcp.register(
+                name=name,
+                description=description,
+                category=category,
+                handler=mcp_wrapper,
+                input_schema=input_schema,
+                examples=examples,
+            )
+
+            # --- REST registration ---
+            async def rest_handler(request: Request) -> Any:
+                try:
+                    body = await request.json()
+                except Exception:
+                    body = {}
+                try:
+                    result = await fn(body)
+                    return _ok(result)
+                except ServiceError as e:
+                    return _error(e.code, str(e), e.details)
+
+            self.api.post(f"/api/{domain}/{name}")(rest_handler)
+
+            return fn
+
+        if handler is not None:
+            decorator(handler)
+            return handler
         return decorator
 
     @staticmethod
